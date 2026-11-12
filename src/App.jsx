@@ -9,6 +9,9 @@ const DAYS = [{ id: 'day1', name: 'Day 1' }, { id: 'day2', name: 'Day 2' }];
 const ICONS = [['copilot', 'Microsoft 365 Copilot'], ['m365', 'Microsoft 365'], ['word', 'Word'], ['excel', 'Excel'], ['powerpoint', 'PowerPoint'], ['outlook', 'Outlook'], ['teams', 'Teams'], ['onenote', 'OneNote / Notebook'], ['sharepoint', 'SharePoint'], ['onedrive', 'OneDrive'], ['loop', 'Loop'], ['forms', 'Forms'], ['powerbi', 'Power BI'], ['image', 'Image generation']];
 // Icon names saved before the official logos map onto them.
 const ICON_ALIASES = { skills: 'copilot', note: 'onenote', generic: 'm365' };
+// Practice topics are marked by this ID prefix (same as the Excel template's Topic ID column).
+const PRACTICE_PREFIX = '__ambot_practice__';
+const isPractice = t => t.id.startsWith(PRACTICE_PREFIX);
 const SETTINGS_TABS = [['topics', 'Topics'], ['links', 'Links'], ['branding', 'Branding'], ['general', 'Timer & backup']];
 const iconNames = new Set([...ICONS.map(i => i[0]), ...Object.keys(ICON_ALIASES)]);
 const makeID = () => 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -95,7 +98,8 @@ export default function App({ onSignOut }) {
   }
   useEffect(() => { loadAll(); }, []);
 
-  const current = topics.find(t => t.id === prefs.selectedTopic) || topics[0];
+  const visibleTopics = topics.filter(t => isPractice(t) === !!prefs.practiceMode);
+  const current = visibleTopics.find(t => t.id === prefs.selectedTopic) || visibleTopics[0];
   const currentTab = current && (current.tabs.find(x => x.id === prefs.activeTabs[current.id]) || current.tabs[0]);
   const setTopic = (id, fn) => setTopics(ts => ts.map(t => (t.id === id ? fn(t) : t)));
   const selectTopic = id => updatePrefs({ selectedTopic: id });
@@ -155,7 +159,7 @@ export default function App({ onSignOut }) {
   // ---- Topics
   async function moveTopic(id, delta) {
     const t = topics.find(x => x.id === id); if (!t) return;
-    const members = topics.filter(x => x.day === t.day), other = members[members.indexOf(t) + delta]; if (!other) return;
+    const members = topics.filter(x => x.day === t.day && isPractice(x) === isPractice(t)), other = members[members.indexOf(t) + delta]; if (!other) return;
     const a = topics.indexOf(t), b = topics.indexOf(other);
     const next = [...topics]; [next[a], next[b]] = [{ ...other, position: t.position }, { ...t, position: other.position }];
     // Positions may collide after imports; fall back to array order when they do.
@@ -188,7 +192,7 @@ export default function App({ onSignOut }) {
     } else {
       if (topics.length >= 150) { notify('Maximum of 150 topics.'); return; }
       const tab = { id: makeID(), name: 'Prompt 1', text: '', position: 0 };
-      const t = { id: makeID(), name, icon, iconData, day, position: nextPosition(topics), tabs: [tab] };
+      const t = { id: (prefs.practiceMode ? PRACTICE_PREFIX : '') + makeID(), name, icon, iconData, day, position: nextPosition(topics), tabs: [tab] };
       setTopics(ts => [...ts, t]); selectTopic(t.id);
       ok = await db(supabase.from('topics').insert(topicRow(t))) && await db(supabase.from('prompts').insert(promptRow(t.id, tab)));
     }
@@ -200,7 +204,7 @@ export default function App({ onSignOut }) {
     if (!confirm('Delete "' + t.name + '" and all its prompt tabs?')) return;
     t.tabs.forEach(x => { clearTimeout(pendingText.current[x.id]?.timer); delete pendingText.current[x.id]; });
     setTopics(ts => ts.filter(x => x.id !== id));
-    if (prefs.selectedTopic === id) { const first = topics.find(x => x.id !== id); updatePrefs({ selectedTopic: first.id, collapsedDays: { ...prefs.collapsedDays, [first.day]: false } }); }
+    if (prefs.selectedTopic === id) { const first = visibleTopics.find(x => x.id !== id); if (first) updatePrefs({ selectedTopic: first.id, collapsedDays: { ...prefs.collapsedDays, [first.day]: false } }); }
     if (topicForm.editingId === id) clearTopicEdit();
     if (await db(supabase.from('topics').delete().eq('id', id))) notify('Topic deleted.');
   }
@@ -313,10 +317,14 @@ export default function App({ onSignOut }) {
         <section className="hero"><Timer chime={prefs.chime} notify={notify} modalOpenRef={timeModalOpen} closeModalRef={closeTimeModal} /></section>
         <section className="workspace" aria-label="Workshop exercises">
           <aside className="sidebar">
-            <h2 className="side-label">Topics</h2><p className="side-hint">Choose a day. Manage topics in Settings.</p>
+            <div className="ds-segmented mode-switch" role="group" aria-label="Mode">
+              <button type="button" className={'ds-segment' + (!prefs.practiceMode ? ' active' : '')} aria-pressed={!prefs.practiceMode} onClick={() => updatePrefs({ practiceMode: false })}>Workshop</button>
+              <button type="button" className={'ds-segment' + (prefs.practiceMode ? ' active' : '')} aria-pressed={!!prefs.practiceMode} onClick={() => updatePrefs({ practiceMode: true })}>Practice</button>
+            </div>
+            <h2 className="side-label">{prefs.practiceMode ? 'Practice topics' : 'Topics'}</h2><p className="side-hint">Choose a day. Manage topics in Settings.</p>
             <div className="topics" aria-label="Webinar topics by day">
               {DAYS.map(day => {
-                const members = topics.filter(t => t.day === day.id);
+                const members = visibleTopics.filter(t => t.day === day.id);
                 return (
                   <details key={day.id} className="day-group" data-day={day.id} open={!prefs.collapsedDays[day.id]} onToggle={e => { const collapsed = !e.currentTarget.open; if (prefs.collapsedDays[day.id] !== collapsed) updatePrefs({ collapsedDays: { ...prefs.collapsedDays, [day.id]: collapsed } }); }}>
                     <summary>{day.name}<span className="day-count">{members.length} topics</span></summary>
@@ -338,7 +346,7 @@ export default function App({ onSignOut }) {
             {loadError ? (
               <div className="prompt-main"><h3 className="prompt-title">Could not load from Supabase</h3><p>{loadError}</p><p>Run <code>supabase/schema.sql</code> in the Supabase SQL Editor, then <code>npm run seed</code>.</p><button className="btn" type="button" onClick={loadAll}>Retry</button></div>
             ) : !current ? (
-              <div className="prompt-main"><p>{loading ? 'Loading workshop…' : 'No topics yet. Run npm run seed or add a topic in Settings.'}</p></div>
+              <div className="prompt-main"><p>{loading ? 'Loading workshop…' : (prefs.practiceMode ? 'No practice topics yet. Add one in Settings.' : 'No topics yet. Run npm run seed or add a topic in Settings.')}</p></div>
             ) : (
               <>
                 <div className="editor-header">
@@ -374,7 +382,7 @@ export default function App({ onSignOut }) {
         {settingsTab === 'topics' && (
           <div role="tabpanel">
             <form className="settings-card" onSubmit={submitTopic}>
-              <h3>{topicForm.editingId ? 'Edit topic' : 'Add a topic'}</h3>
+              <h3>{topicForm.editingId ? 'Edit topic' : prefs.practiceMode ? 'Add a practice topic' : 'Add a workshop topic'}</h3>
               <label className="field-label" htmlFor="topicNameInput">Topic name</label>
               <input ref={topicNameRef} className="form-field" id="topicNameInput" type="text" maxLength={45} placeholder="e.g. Copilot Notebook" required value={topicForm.name} onChange={e => setTopicForm(f => ({ ...f, name: e.target.value }))} />
               <label className="field-label" htmlFor="topicDaySelect">Workshop day</label>
@@ -390,9 +398,9 @@ export default function App({ onSignOut }) {
               <p className="smallnote upload-note">PNG, JPG, WebP, GIF or SVG, up to 5 MB. Images fit inside a square without cropping.</p>
               <div className="form-row"><button className="btn primary" type="submit">{topicForm.editingId ? 'Save changes' : 'Add topic'}</button><button className={'btn' + (topicForm.editingId ? '' : ' hidden')} type="button" onClick={clearTopicEdit}>Cancel</button></div>
             </form>
-            <h3 className="settings-heading">Your topics</h3><p className="settings-subtitle">Use ↑ and ↓ to reorder within a day. Edit loads the topic into the form above.</p>
+            <h3 className="settings-heading">{prefs.practiceMode ? 'Practice topics' : 'Workshop topics'}</h3><p className="settings-subtitle">Use ↑ and ↓ to reorder within a day. Edit loads the topic into the form above.</p>
             {DAYS.map(day => {
-              const members = topics.filter(t => t.day === day.id);
+              const members = visibleTopics.filter(t => t.day === day.id);
               return (
                 <div key={day.id}>
                   <h4 className="setting-day-title">{day.name} · {members.length}</h4>
